@@ -1,4 +1,5 @@
 from typing import AsyncGenerator, Optional
+import logging
 
 # Critically: never import create_engine (sync) to avoid psycopg2 paths.
 from sqlalchemy.ext.asyncio import (
@@ -9,6 +10,8 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from src.core.config import get_settings
+
+logger = logging.getLogger("reddit-backend.db")
 
 # Settings are read lazily to avoid hard failures at import time.
 _settings = get_settings()
@@ -71,6 +74,8 @@ def _ensure_engine_initialized() -> None:
     url = _get_database_url()
     # If URL invalid or empty, do not raise here; let accessor raise with clear message.
     if not url or not url.startswith("postgresql+asyncpg://"):
+        # Log only once at debug level to avoid noise; this is a valid "no-DB" boot mode.
+        logger.debug("Database URL missing or invalid at lazy init; skipping engine creation.")
         return
 
     _engine = create_async_engine(url, future=True, pool_pre_ping=True)
@@ -87,6 +92,7 @@ def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
     _ensure_engine_initialized()
     if _sessionmaker is None:
         url = _get_database_url()
+        # Provide a clear, non-psycopg2 path message to keep users from configuring wrong driver.
         raise RuntimeError(
             "Database is not configured or URL scheme is invalid. "
             "Set POSTGRES_URL to an async URL using 'postgresql+asyncpg://'. "

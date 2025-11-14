@@ -4,7 +4,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.core.config import get_settings
-from src.core.db import get_sessionmaker
 from src.api.auth import router as auth_router
 
 settings = get_settings()
@@ -26,24 +25,19 @@ app = FastAPI(
 logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO))
 logger = logging.getLogger("reddit-backend")
 
-# Do NOT force DB initialization here. App should boot without DB.
-# Attempt a non-fatal lazy init on startup; never block or crash if DB is absent.
+# Do NOT perform any DB initialization on startup.
+# Keep startup non-blocking and independent from DB configuration.
 @app.on_event("startup")
 async def startup_event():
     """
     Application startup hook.
 
     Behavior:
-    - Attempts to initialize the DB sessionmaker lazily if a valid POSTGRES_URL is configured.
-    - Never blocks or crashes the app if DB is absent or misconfigured.
-    - Ensures the service responds on port 3001 (e.g., GET /) regardless of DB state.
+    - Does not initialize database connections.
+    - Ensures the service responds on port 3001 regardless of DB state.
+    - Logs that the app started successfully.
     """
-    try:
-        # Accessing sessionmaker may raise if DB URL is missing/invalid; swallow and log.
-        get_sessionmaker()
-        logger.info("Database sessionmaker initialized successfully (if configured).")
-    except Exception as e:
-        logger.warning("Database is not ready or misconfigured at startup: %s", str(e))
+    logger.info("FastAPI application startup: skipping DB initialization by design.")
 
 app.add_middleware(
     CORSMiddleware,

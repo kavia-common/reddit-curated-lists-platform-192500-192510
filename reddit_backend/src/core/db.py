@@ -25,12 +25,40 @@ def _get_database_url() -> str:
     return (_settings.POSTGRES_URL or "").strip()
 
 
-def _validate_database_url_or_raise(url: str) -> None:
+def _normalize_to_async_url(url: str) -> str:
     """
-    Validate that the database URL is configured and uses the asyncpg driver.
+    Normalize a Postgres URL to the asyncpg scheme if possible.
 
-    Enforce the 'postgresql+asyncpg://' scheme to ensure SQLAlchemy never tries
-    to import psycopg2. This is called only at actual DB usage time.
+    Behavior:
+    - If empty, return empty (caller decides whether to raise).
+    - If already 'postgresql+asyncpg://', return as-is.
+    - If starts with 'postgresql://', auto-upgrade to 'postgresql+asyncpg://'
+      and log a helpful warning.
+    - Otherwise, return as-is (may be invalid; caller may raise later).
+
+    This avoids import/startup failures by allowing a non-async URL to be
+    upgraded only when building the async engine.
+    """
+    if not url:
+        return url
+    if url.startswith("postgresql+asyncpg://"):
+        return url
+    if url.startswith("postgresql://"):
+        upgraded = "postgresql+asyncpg://" + url[len("postgresql://") :]
+        logger.warning(
+            "POSTGRES_URL used 'postgresql://' scheme; auto-upgrading to 'postgresql+asyncpg://'. "
+            "Please update your configuration to avoid this warning. Upgraded URL will be used for engine creation."
+        )
+        return upgraded
+    return url
+
+
+def _validate_database_url_or_raise(url: str) -> str:
+    """
+    Validate that the database URL is configured. If a non-async Postgres URL
+    is provided, attempt to auto-upgrade to asyncpg.
+
+    Returns the validated (and possibly upgraded) URL.
     """
     if not url:
         raise RuntimeError(
@@ -38,11 +66,13 @@ def _validate_database_url_or_raise(url: str) -> None:
             "Provide an async SQLAlchemy URL like: "
             "postgresql+asyncpg://user:password@host:port/dbname"
         )
-    if not url.startswith("postgresql+asyncpg://"):
+    normalized = _normalize_to_async_url(url)
+    if not normalized.startswith("postgresql+asyncpg://"):
         raise RuntimeError(
             f"Invalid POSTGRES_URL scheme: {url}. "
             "It must use the 'postgresql+asyncpg://' scheme for async operation."
         )
+    return normalized
 
 
 # PUBLIC_INTERFACE
@@ -50,14 +80,15 @@ def get_engine() -> AsyncEngine:
     """Create and return an Async SQLAlchemy engine bound to POSTGRES_URL.
 
     This function validates the URL and guarantees use of asyncpg. It performs
-    no module-import-time side effects.
+    no module-import-time side effects and will auto-upgrade 'postgresql://'
+    to 'postgresql+asyncpg://' with a warning log.
     """
     url = _get_database_url()
-    _validate_database_url_or_raise(url)
-    return create_async_engine(url, future=True, pool_pre_ping=True)
+    validated_url = _validate_database_url_or_raise(url)
+    return create_async_engine(validated_url, future=True, pool_pre_ping=True)
 
 
-# Create a singleton engine and sessionmaker for app lifecycle (lazy)
+# Create a singleton engine and sessionmaker for app lifecycle (fully lazy)
 _engine: Optional[AsyncEngine] = None
 _sessionmaker: Optional[async_sessionmaker[AsyncSession]] = None
 
@@ -72,13 +103,22 @@ def _ensure_engine_initialized() -> None:
         return
 
     url = _get_database_url()
-    # If URL invalid or empty, do not raise here; let accessor raise with clear message.
-    if not url or not url.startswith("postgresql+asyncpg://"):
-        # Log only once at debug level to avoid noise; this is a valid "no-DB" boot mode.
-        logger.debug("Database URL missing or invalid at lazy init; skipping engine creation.")
+    if not url:
+        # No DB configured: skip creation silently (valid mode).
+        logger.debug("POSTGRES_URL is empty; skipping engine creation until DB is needed/configured.")
         return
 
-    _engine = create_async_engine(url, future=True, pool_pre_ping=True)
+    # Attempt normalization (auto-upgrade) and then create the engine.
+    normalized = _normalize_to_async_url(url)
+    if not normalized.startswith("postgresql+asyncpg://"):
+        # Still invalid after normalization; do not raise here to avoid startup failure.
+        logger.warning(
+            "POSTGRES_URL appears invalid for async operation (value: '%s'). "
+            "Set to 'postgresql+asyncpg://...' to enable DB access.", url or "EMPTY"
+        )
+        return
+
+    _engine = create_async_engine(normalized, future=True, pool_pre_ping=True)
     _sessionmaker = async_sessionmaker(bind=_engine, expire_on_commit=False)
 
 
@@ -92,7 +132,6 @@ def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
     _ensure_engine_initialized()
     if _sessionmaker is None:
         url = _get_database_url()
-        # Provide a clear, non-psycopg2 path message to keep users from configuring wrong driver.
         raise RuntimeError(
             "Database is not configured or URL scheme is invalid. "
             "Set POSTGRES_URL to an async URL using 'postgresql+asyncpg://'. "

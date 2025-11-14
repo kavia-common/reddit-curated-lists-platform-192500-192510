@@ -12,7 +12,9 @@ class Settings(BaseModel):
     """Application settings loaded from environment variables.
 
     Notes:
-    - POSTGRES_URL must be an async SQLAlchemy URL using 'postgresql+asyncpg://'.
+    - Preferred: POSTGRES_URL uses async SQLAlchemy URL 'postgresql+asyncpg://'.
+    - If 'postgresql://' is provided, the DB layer will auto-upgrade to asyncpg at runtime
+      with a warning log to help you fix your config.
     - Leave POSTGRES_URL empty by default so the app can boot without DB; routes
       that require DB will raise clear errors when accessed.
     """

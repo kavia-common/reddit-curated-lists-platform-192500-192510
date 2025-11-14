@@ -1,22 +1,33 @@
 from typing import AsyncGenerator, Optional
 
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+# Critically: never import create_engine (sync) to avoid psycopg2 paths.
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from src.core.config import get_settings
 
+# Settings are read lazily to avoid hard failures at import time.
 _settings = get_settings()
 
-# NOTE: Lazy-read URL to allow app boot without DB configured.
+
 def _get_database_url() -> str:
+    """
+    Return the configured database URL (may be empty).
+    We avoid raising here to permit the app to boot without DB.
+    """
     return (_settings.POSTGRES_URL or "").strip()
 
 
-def _validate_database_url(url: str) -> None:
+def _validate_database_url_or_raise(url: str) -> None:
     """
     Validate that the database URL is configured and uses the asyncpg driver.
 
-    We explicitly enforce the 'postgresql+asyncpg://' scheme to avoid SQLAlchemy
-    attempting to import psycopg2 and failing with ModuleNotFoundError.
+    Enforce the 'postgresql+asyncpg://' scheme to ensure SQLAlchemy never tries
+    to import psycopg2. This is called only at actual DB usage time.
     """
     if not url:
         raise RuntimeError(
@@ -30,41 +41,51 @@ def _validate_database_url(url: str) -> None:
             "It must use the 'postgresql+asyncpg://' scheme for async operation."
         )
 
+
 # PUBLIC_INTERFACE
 def get_engine() -> AsyncEngine:
-    """Create and return an Async SQLAlchemy engine bound to POSTGRES_URL."""
+    """Create and return an Async SQLAlchemy engine bound to POSTGRES_URL.
+
+    This function validates the URL and guarantees use of asyncpg. It performs
+    no module-import-time side effects.
+    """
     url = _get_database_url()
-    _validate_database_url(url)
+    _validate_database_url_or_raise(url)
     return create_async_engine(url, future=True, pool_pre_ping=True)
 
 
-# Create a singleton engine and sessionmaker for app lifecycle
+# Create a singleton engine and sessionmaker for app lifecycle (lazy)
 _engine: Optional[AsyncEngine] = None
 _sessionmaker: Optional[async_sessionmaker[AsyncSession]] = None
 
 
-def _ensure_engine() -> None:
+def _ensure_engine_initialized() -> None:
     """
     Initialize engine and sessionmaker on-demand.
-    This function defers failure until a DB access is attempted.
+    This function defers validation and potential failure until DB access.
     """
     global _engine, _sessionmaker
-    if _engine is None:
-        url = _get_database_url()
-        # Do not raise at import time if URL missing; postpone until first actual DB usage.
-        if not url or not url.startswith("postgresql+asyncpg://"):
-            # Leave engine/sessionmaker unset; will raise when accessed.
-            return
-        _engine = create_async_engine(url, future=True, pool_pre_ping=True)
-        _sessionmaker = async_sessionmaker(bind=_engine, expire_on_commit=False)
+    if _engine is not None and _sessionmaker is not None:
+        return
+
+    url = _get_database_url()
+    # If URL invalid or empty, do not raise here; let accessor raise with clear message.
+    if not url or not url.startswith("postgresql+asyncpg://"):
+        return
+
+    _engine = create_async_engine(url, future=True, pool_pre_ping=True)
+    _sessionmaker = async_sessionmaker(bind=_engine, expire_on_commit=False)
 
 
 # PUBLIC_INTERFACE
 def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
-    """Return the AsyncSession sessionmaker, initializing if needed."""
-    _ensure_engine()
+    """Return the AsyncSession sessionmaker, initializing if needed.
+
+    Raises a clear error if database configuration is missing or invalid,
+    ensuring callers only fail when they actually require DB access.
+    """
+    _ensure_engine_initialized()
     if _sessionmaker is None:
-        # Provide a clear error only when callers actually need the DB.
         url = _get_database_url()
         raise RuntimeError(
             "Database is not configured or URL scheme is invalid. "
@@ -76,7 +97,11 @@ def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
 
 # PUBLIC_INTERFACE
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """FastAPI dependency that yields an AsyncSession."""
+    """FastAPI dependency that yields an AsyncSession.
+
+    The engine and sessionmaker are created lazily and validated to enforce
+    asyncpg usage. This avoids any psycopg2 imports.
+    """
     session_maker = get_sessionmaker()
     async with session_maker() as session:
         yield session

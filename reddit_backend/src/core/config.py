@@ -9,8 +9,13 @@ load_dotenv()
 
 
 class Settings(BaseModel):
-    """Application settings loaded from environment variables."""
+    """Application settings loaded from environment variables.
 
+    Notes:
+    - POSTGRES_URL must be an async SQLAlchemy URL using 'postgresql+asyncpg://'.
+    - Leave POSTGRES_URL empty by default so the app can boot without DB; routes
+      that require DB will raise clear errors when accessed.
+    """
     # Database
     POSTGRES_URL: str = os.getenv("POSTGRES_URL", "")
 

@@ -26,7 +26,7 @@ logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL.upper(), logging.I
 logger = logging.getLogger("reddit-backend")
 
 # Do NOT force DB initialization here. App should boot without DB.
-# Instead, attempt a non-fatal init on startup and log status.
+# Attempt a non-fatal lazy init on startup; never block or crash if DB is absent.
 @app.on_event("startup")
 async def startup_event():
     """
@@ -34,10 +34,9 @@ async def startup_event():
     This keeps the app responsive (e.g., for health checks) even if DB is unavailable.
     """
     try:
-        # This will raise only if someone attempts to use DB without configuration later.
-        # Here, we call to try initialize; if not configured, it will raise and be caught.
+        # Accessing sessionmaker may raise if DB URL is missing/invalid; swallow and log.
         get_sessionmaker()
-        logger.info("Database sessionmaker initialized successfully.")
+        logger.info("Database sessionmaker initialized successfully (if configured).")
     except Exception as e:
         logger.warning("Database is not ready or misconfigured at startup: %s", str(e))
 

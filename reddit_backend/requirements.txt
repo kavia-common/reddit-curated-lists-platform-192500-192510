@@ -42,6 +42,7 @@ uvloop==0.21.0
 watchfiles==1.0.5
 websockets==15.0.1
 # Added for DB/Auth/Security
+# NOTE: Use asyncpg driver with SQLAlchemy asyncio; do not add psycopg2.
 SQLAlchemy[asyncio]==2.0.36
 asyncpg==0.30.0
 passlib[bcrypt]==1.7.4

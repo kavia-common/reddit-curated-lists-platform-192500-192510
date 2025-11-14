@@ -35,7 +35,12 @@ class Settings(BaseModel):
 
 # PUBLIC_INTERFACE
 def get_settings() -> Settings:
-    """Return cached Settings instance for application-wide use."""
+    """Return cached Settings instance for application-wide use.
+
+    Notes:
+    - POSTGRES_URL may be empty to allow the app to boot without a database.
+    - Database-dependent routes should handle missing DB gracefully.
+    """
     # Simple module-level cache pattern
     global _settings
     try:

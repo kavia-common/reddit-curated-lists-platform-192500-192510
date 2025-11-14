@@ -6,8 +6,10 @@ from src.core.config import get_settings
 
 _settings = get_settings()
 
-# Create async engine using POSTGRES_URL. Expect async driver in URL (e.g., postgresql+asyncpg://)
-DATABASE_URL = (_settings.POSTGRES_URL or "").strip()
+# NOTE: Lazy-read URL to allow app boot without DB configured.
+def _get_database_url() -> str:
+    return (_settings.POSTGRES_URL or "").strip()
+
 
 def _validate_database_url(url: str) -> None:
     """
@@ -31,8 +33,9 @@ def _validate_database_url(url: str) -> None:
 # PUBLIC_INTERFACE
 def get_engine() -> AsyncEngine:
     """Create and return an Async SQLAlchemy engine bound to POSTGRES_URL."""
-    _validate_database_url(DATABASE_URL)
-    return create_async_engine(DATABASE_URL, future=True, pool_pre_ping=True)
+    url = _get_database_url()
+    _validate_database_url(url)
+    return create_async_engine(url, future=True, pool_pre_ping=True)
 
 
 # Create a singleton engine and sessionmaker for app lifecycle
@@ -40,10 +43,19 @@ _engine: Optional[AsyncEngine] = None
 _sessionmaker: Optional[async_sessionmaker[AsyncSession]] = None
 
 
-def _ensure_engine():
+def _ensure_engine() -> None:
+    """
+    Initialize engine and sessionmaker on-demand.
+    This function defers failure until a DB access is attempted.
+    """
     global _engine, _sessionmaker
     if _engine is None:
-        _engine = get_engine()
+        url = _get_database_url()
+        # Do not raise at import time if URL missing; postpone until first actual DB usage.
+        if not url or not url.startswith("postgresql+asyncpg://"):
+            # Leave engine/sessionmaker unset; will raise when accessed.
+            return
+        _engine = create_async_engine(url, future=True, pool_pre_ping=True)
         _sessionmaker = async_sessionmaker(bind=_engine, expire_on_commit=False)
 
 
@@ -51,7 +63,14 @@ def _ensure_engine():
 def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
     """Return the AsyncSession sessionmaker, initializing if needed."""
     _ensure_engine()
-    assert _sessionmaker is not None
+    if _sessionmaker is None:
+        # Provide a clear error only when callers actually need the DB.
+        url = _get_database_url()
+        raise RuntimeError(
+            "Database is not configured or URL scheme is invalid. "
+            "Set POSTGRES_URL to an async URL using 'postgresql+asyncpg://'. "
+            f"Current value: '{url or 'EMPTY'}'"
+        )
     return _sessionmaker
 
 
